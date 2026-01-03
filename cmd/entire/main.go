@@ -1,0 +1,33 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"entire.io/cli/cmd/entire/cli"
+)
+
+func main() {
+	// Create context that cancels on interrupt
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Handle interrupt signals
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		cancel()
+	}()
+
+	// Create and execute root command
+	rootCmd := cli.NewRootCmd()
+	if err := rootCmd.ExecuteContext(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		cancel()
+		os.Exit(1)
+	}
+	cancel() // Cleanup on successful exit
+}

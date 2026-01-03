@@ -1,0 +1,189 @@
+package agent
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestRegistryOperations(t *testing.T) {
+	// Save original registry state and restore after test
+	originalRegistry := make(map[string]Factory)
+	registryMu.Lock()
+	for k, v := range registry {
+		originalRegistry[k] = v
+	}
+	// Clear registry for testing
+	registry = make(map[string]Factory)
+	registryMu.Unlock()
+
+	defer func() {
+		registryMu.Lock()
+		registry = originalRegistry
+		registryMu.Unlock()
+	}()
+
+	t.Run("Register and Get", func(t *testing.T) {
+		Register("test-agent", func() Agent {
+			return &mockAgent{}
+		})
+
+		agent, err := Get("test-agent")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if agent.Name() != mockAgentName {
+			t.Errorf("expected Name() %q, got %q", mockAgentName, agent.Name())
+		}
+	})
+
+	t.Run("Get unknown agent returns error", func(t *testing.T) {
+		_, err := Get("nonexistent-agent")
+		if err == nil {
+			t.Error("expected error for unknown agent")
+		}
+		if !strings.Contains(err.Error(), "unknown agent") {
+			t.Errorf("expected 'unknown agent' in error, got: %v", err)
+		}
+	})
+
+	t.Run("List returns registered agents", func(t *testing.T) {
+		// Clear and register fresh
+		registryMu.Lock()
+		registry = make(map[string]Factory)
+		registryMu.Unlock()
+
+		Register("agent-b", func() Agent { return &mockAgent{} })
+		Register("agent-a", func() Agent { return &mockAgent{} })
+
+		names := List()
+		if len(names) != 2 {
+			t.Errorf("expected 2 agents, got %d", len(names))
+		}
+		// List should return sorted
+		if names[0] != "agent-a" || names[1] != "agent-b" {
+			t.Errorf("expected sorted list [agent-a, agent-b], got %v", names)
+		}
+	})
+}
+
+func TestDetect(t *testing.T) {
+	// Save original registry state
+	originalRegistry := make(map[string]Factory)
+	registryMu.Lock()
+	for k, v := range registry {
+		originalRegistry[k] = v
+	}
+	registry = make(map[string]Factory)
+	registryMu.Unlock()
+
+	defer func() {
+		registryMu.Lock()
+		registry = originalRegistry
+		registryMu.Unlock()
+	}()
+
+	t.Run("returns error when no agents detected", func(t *testing.T) {
+		// Register an agent that won't be detected
+		Register("undetected", func() Agent {
+			return &mockAgent{} // DetectPresence returns false
+		})
+
+		_, err := Detect()
+		if err == nil {
+			t.Error("expected error when no agent detected")
+		}
+		if !strings.Contains(err.Error(), "no agent detected") {
+			t.Errorf("expected 'no agent detected' in error, got: %v", err)
+		}
+	})
+
+	t.Run("returns detected agent", func(t *testing.T) {
+		// Clear registry
+		registryMu.Lock()
+		registry = make(map[string]Factory)
+		registryMu.Unlock()
+
+		// Register an agent that will be detected
+		Register("detected", func() Agent {
+			return &detectableAgent{}
+		})
+
+		agent, err := Detect()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if agent.Name() != "detectable" {
+			t.Errorf("expected Name() %q, got %q", "detectable", agent.Name())
+		}
+	})
+}
+
+// detectableAgent is a mock that returns true for DetectPresence
+type detectableAgent struct {
+	mockAgent
+}
+
+func (d *detectableAgent) Name() string {
+	return "detectable"
+}
+
+func (d *detectableAgent) DetectPresence() (bool, error) {
+	return true, nil
+}
+
+func TestAgentNameConstants(t *testing.T) {
+	if AgentNameClaudeCode != "claude-code" {
+		t.Errorf("expected AgentNameClaudeCode %q, got %q", "claude-code", AgentNameClaudeCode)
+	}
+	if AgentNameCursor != "cursor" {
+		t.Errorf("expected AgentNameCursor %q, got %q", "cursor", AgentNameCursor)
+	}
+	if AgentNameWindsurf != "windsurf" {
+		t.Errorf("expected AgentNameWindsurf %q, got %q", "windsurf", AgentNameWindsurf)
+	}
+	if AgentNameAider != "aider" {
+		t.Errorf("expected AgentNameAider %q, got %q", "aider", AgentNameAider)
+	}
+	if AgentNameGemini != "gemini" {
+		t.Errorf("expected AgentNameGemini %q, got %q", "gemini", AgentNameGemini)
+	}
+}
+
+func TestDefaultAgentName(t *testing.T) {
+	if DefaultAgentName != AgentNameClaudeCode {
+		t.Errorf("expected DefaultAgentName %q, got %q", AgentNameClaudeCode, DefaultAgentName)
+	}
+}
+
+func TestDefault(t *testing.T) {
+	// Default() returns nil if default agent is not registered
+	// This test verifies the function doesn't panic
+	originalRegistry := make(map[string]Factory)
+	registryMu.Lock()
+	for k, v := range registry {
+		originalRegistry[k] = v
+	}
+	registry = make(map[string]Factory)
+	registryMu.Unlock()
+
+	defer func() {
+		registryMu.Lock()
+		registry = originalRegistry
+		registryMu.Unlock()
+	}()
+
+	agent := Default()
+	if agent != nil {
+		t.Error("expected nil when default agent not registered")
+	}
+
+	// Register the default agent
+	Register(DefaultAgentName, func() Agent {
+		return &mockAgent{}
+	})
+
+	agent = Default()
+	if agent == nil {
+		t.Error("expected non-nil agent after registering default")
+	}
+}

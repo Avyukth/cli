@@ -1,0 +1,839 @@
+package checkpoint
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"entire.io/cli/cmd/entire/cli/paths"
+
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/filemode"
+	"github.com/go-git/go-git/v5/plumbing/object"
+)
+
+const (
+	// ShadowBranchPrefix is the prefix for shadow branches.
+	ShadowBranchPrefix = "entire/"
+
+	// gitDir and entireDir are excluded from tree operations.
+	gitDir    = ".git"
+	entireDir = ".entire"
+)
+
+// WriteTemporary writes a temporary checkpoint to a shadow branch.
+// Shadow branches are named entire/<base-commit-short-hash>.
+// Returns the commit hash of the created checkpoint.
+func (s *GitStore) WriteTemporary(ctx context.Context, opts WriteTemporaryOptions) (plumbing.Hash, error) {
+	_ = ctx // Reserved for future use (e.g., cancellation)
+
+	// Validate session ID to prevent path traversal
+	if err := paths.ValidateSessionID(opts.SessionID); err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("invalid temporary checkpoint options: %w", err)
+	}
+
+	// Get shadow branch name
+	shadowBranchName := ShadowBranchNameForCommit(opts.BaseCommit)
+
+	// Get or create shadow branch
+	parentHash, baseTreeHash, err := s.getOrCreateShadowBranch(shadowBranchName)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("failed to get shadow branch: %w", err)
+	}
+
+	// Collect all files to include
+	var allFiles []string
+	if opts.IsFirstCheckpoint {
+		// For the first checkpoint of this session, capture ALL files in working directory
+		// This ensures untracked files present at session start are included
+		allFiles, err = collectWorkingDirectoryFiles()
+		if err != nil {
+			return plumbing.ZeroHash, fmt.Errorf("failed to collect working directory files: %w", err)
+		}
+	} else {
+		// For subsequent checkpoints, only include modified/new files
+		allFiles = make([]string, 0, len(opts.ModifiedFiles)+len(opts.NewFiles))
+		allFiles = append(allFiles, opts.ModifiedFiles...)
+		allFiles = append(allFiles, opts.NewFiles...)
+	}
+
+	// Build tree with changes
+	treeHash, err := s.buildTreeWithChanges(baseTreeHash, allFiles, opts.DeletedFiles, opts.MetadataDir, opts.MetadataDirAbs)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("failed to build tree: %w", err)
+	}
+
+	// Create checkpoint commit with trailers
+	commitMsg := paths.FormatShadowCommitMessage(opts.CommitMessage, opts.MetadataDir, opts.SessionID)
+
+	commitHash, err := s.createCommit(treeHash, parentHash, commitMsg, opts.AuthorName, opts.AuthorEmail)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("failed to create commit: %w", err)
+	}
+
+	// Update branch reference
+	refName := plumbing.NewBranchReferenceName(shadowBranchName)
+	newRef := plumbing.NewHashReference(refName, commitHash)
+	if err := s.repo.Storer.SetReference(newRef); err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("failed to update branch reference: %w", err)
+	}
+
+	return commitHash, nil
+}
+
+// ReadTemporary reads the latest checkpoint from a shadow branch.
+// Returns nil if the shadow branch doesn't exist.
+func (s *GitStore) ReadTemporary(ctx context.Context, baseCommit string) (*ReadTemporaryResult, error) {
+	_ = ctx // Reserved for future use
+
+	shadowBranchName := ShadowBranchNameForCommit(baseCommit)
+	refName := plumbing.NewBranchReferenceName(shadowBranchName)
+
+	ref, err := s.repo.Reference(refName, true)
+	if err != nil {
+		return nil, nil //nolint:nilnil,nilerr // Branch not found is an expected case
+	}
+
+	commit, err := s.repo.CommitObject(ref.Hash())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get commit object: %w", err)
+	}
+
+	// Extract session ID and metadata dir from commit trailers
+	sessionID, _ := paths.ParseSessionTrailer(commit.Message)
+	metadataDir, _ := paths.ParseMetadataTrailer(commit.Message)
+
+	return &ReadTemporaryResult{
+		CommitHash:  ref.Hash(),
+		TreeHash:    commit.TreeHash,
+		SessionID:   sessionID,
+		MetadataDir: metadataDir,
+		Timestamp:   commit.Author.When,
+	}, nil
+}
+
+// ListTemporary lists all shadow branches with their checkpoint info.
+func (s *GitStore) ListTemporary(ctx context.Context) ([]TemporaryInfo, error) {
+	_ = ctx // Reserved for future use
+
+	iter, err := s.repo.Branches()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list branches: %w", err)
+	}
+
+	var results []TemporaryInfo
+	err = iter.ForEach(func(ref *plumbing.Reference) error {
+		branchName := ref.Name().Short()
+		if !strings.HasPrefix(branchName, ShadowBranchPrefix) {
+			return nil
+		}
+
+		// Skip the sessions branch
+		if branchName == paths.MetadataBranchName {
+			return nil
+		}
+
+		commit, commitErr := s.repo.CommitObject(ref.Hash())
+		if commitErr != nil {
+			//nolint:nilerr // Skip branches we can't read (non-fatal)
+			return nil
+		}
+
+		sessionID, _ := paths.ParseSessionTrailer(commit.Message)
+
+		// Extract base commit from branch name
+		baseCommit := strings.TrimPrefix(branchName, ShadowBranchPrefix)
+
+		results = append(results, TemporaryInfo{
+			BranchName:   branchName,
+			BaseCommit:   baseCommit,
+			LatestCommit: ref.Hash(),
+			SessionID:    sessionID,
+			Timestamp:    commit.Author.When,
+		})
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to iterate branches: %w", err)
+	}
+
+	return results, nil
+}
+
+// WriteTemporaryTask writes a task checkpoint to a shadow branch.
+// Task checkpoints include both code changes and task-specific metadata.
+// Returns the commit hash of the created checkpoint.
+func (s *GitStore) WriteTemporaryTask(ctx context.Context, opts WriteTemporaryTaskOptions) (plumbing.Hash, error) {
+	_ = ctx // Reserved for future use
+
+	// Validate identifiers to prevent path traversal and malformed data
+	if err := paths.ValidateSessionID(opts.SessionID); err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("invalid task checkpoint options: %w", err)
+	}
+	if err := paths.ValidateToolUseID(opts.ToolUseID); err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("invalid task checkpoint options: %w", err)
+	}
+	if err := paths.ValidateAgentID(opts.AgentID); err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("invalid task checkpoint options: %w", err)
+	}
+
+	// Get shadow branch name
+	shadowBranchName := ShadowBranchNameForCommit(opts.BaseCommit)
+
+	// Get or create shadow branch
+	parentHash, baseTreeHash, err := s.getOrCreateShadowBranch(shadowBranchName)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("failed to get shadow branch: %w", err)
+	}
+
+	// Collect all files to include in the commit
+	allFiles := make([]string, 0, len(opts.ModifiedFiles)+len(opts.NewFiles))
+	allFiles = append(allFiles, opts.ModifiedFiles...)
+	allFiles = append(allFiles, opts.NewFiles...)
+
+	// Build new tree with code changes (no metadata dir yet)
+	newTreeHash, err := s.buildTreeWithChanges(baseTreeHash, allFiles, opts.DeletedFiles, "", "")
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("failed to build tree: %w", err)
+	}
+
+	// Add task metadata to tree
+	newTreeHash, err = s.addTaskMetadataToTree(newTreeHash, opts)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("failed to add task metadata: %w", err)
+	}
+
+	// Create the commit
+	commitHash, err := s.createCommit(newTreeHash, parentHash, opts.CommitMessage, opts.AuthorName, opts.AuthorEmail)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("failed to create commit: %w", err)
+	}
+
+	// Update shadow branch reference
+	refName := plumbing.NewBranchReferenceName(shadowBranchName)
+	ref := plumbing.NewHashReference(refName, commitHash)
+	if err := s.repo.Storer.SetReference(ref); err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("failed to update shadow branch reference: %w", err)
+	}
+
+	return commitHash, nil
+}
+
+// addTaskMetadataToTree adds task checkpoint metadata to a git tree.
+// When IsIncremental is true, only adds the incremental checkpoint file.
+func (s *GitStore) addTaskMetadataToTree(baseTreeHash plumbing.Hash, opts WriteTemporaryTaskOptions) (plumbing.Hash, error) {
+	// Get base tree and flatten it
+	baseTree, err := s.repo.TreeObject(baseTreeHash)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("failed to get base tree: %w", err)
+	}
+
+	entries := make(map[string]object.TreeEntry)
+	if err := FlattenTree(s.repo, baseTree, "", entries); err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("failed to flatten tree: %w", err)
+	}
+
+	// Compute metadata paths
+	sessionMetadataDir := paths.EntireMetadataDir + "/" + opts.SessionID
+	taskMetadataDir := sessionMetadataDir + "/tasks/" + opts.ToolUseID
+
+	if opts.IsIncremental {
+		// Incremental checkpoint: only add the checkpoint file
+		// Use proper JSON marshaling to handle nil/empty IncrementalData correctly
+		incrementalCheckpoint := struct {
+			Type      string          `json:"type"`
+			ToolUseID string          `json:"tool_use_id"`
+			Timestamp time.Time       `json:"timestamp"`
+			Data      json.RawMessage `json:"data"`
+		}{
+			Type:      opts.IncrementalType,
+			ToolUseID: opts.ToolUseID,
+			Timestamp: time.Now().UTC(),
+			Data:      opts.IncrementalData,
+		}
+		cpData, err := json.MarshalIndent(incrementalCheckpoint, "", "  ")
+		if err != nil {
+			return plumbing.ZeroHash, fmt.Errorf("failed to marshal incremental checkpoint: %w", err)
+		}
+
+		cpBlobHash, err := CreateBlobFromContent(s.repo, cpData)
+		if err != nil {
+			return plumbing.ZeroHash, fmt.Errorf("failed to create incremental checkpoint blob: %w", err)
+		}
+		cpFilename := fmt.Sprintf("%03d-%s.json", opts.IncrementalSequence, opts.ToolUseID)
+		cpPath := taskMetadataDir + "/checkpoints/" + cpFilename
+		entries[cpPath] = object.TreeEntry{
+			Name: cpPath,
+			Mode: filemode.Regular,
+			Hash: cpBlobHash,
+		}
+	} else {
+		// Final checkpoint: add transcripts and checkpoint.json
+
+		// Add session transcript
+		if opts.TranscriptPath != "" {
+			if transcriptContent, readErr := os.ReadFile(opts.TranscriptPath); readErr == nil {
+				if blobHash, blobErr := CreateBlobFromContent(s.repo, transcriptContent); blobErr == nil {
+					transcriptPath := sessionMetadataDir + "/" + paths.TranscriptFileName
+					entries[transcriptPath] = object.TreeEntry{
+						Name: transcriptPath,
+						Mode: filemode.Regular,
+						Hash: blobHash,
+					}
+				}
+			}
+		}
+
+		// Add subagent transcript if available
+		if opts.SubagentTranscriptPath != "" && opts.AgentID != "" {
+			if agentContent, readErr := os.ReadFile(opts.SubagentTranscriptPath); readErr == nil {
+				if blobHash, blobErr := CreateBlobFromContent(s.repo, agentContent); blobErr == nil {
+					agentPath := taskMetadataDir + "/agent-" + opts.AgentID + ".jsonl"
+					entries[agentPath] = object.TreeEntry{
+						Name: agentPath,
+						Mode: filemode.Regular,
+						Hash: blobHash,
+					}
+				}
+			}
+		}
+
+		// Add checkpoint.json
+		checkpointJSON := fmt.Sprintf(`{
+  "session_id": %q,
+  "tool_use_id": %q,
+  "checkpoint_uuid": %q,
+  "agent_id": %q
+}`, opts.SessionID, opts.ToolUseID, opts.CheckpointUUID, opts.AgentID)
+
+		blobHash, err := CreateBlobFromContent(s.repo, []byte(checkpointJSON))
+		if err != nil {
+			return plumbing.ZeroHash, fmt.Errorf("failed to create checkpoint blob: %w", err)
+		}
+		checkpointPath := taskMetadataDir + "/checkpoint.json"
+		entries[checkpointPath] = object.TreeEntry{
+			Name: checkpointPath,
+			Mode: filemode.Regular,
+			Hash: blobHash,
+		}
+	}
+
+	// Build new tree from entries
+	return BuildTreeFromEntries(s.repo, entries)
+}
+
+// ListTemporaryCheckpoints lists all checkpoint commits on a shadow branch.
+// This returns individual commits (rewind points), not just branch info.
+// The sessionID filter, if provided, limits results to commits from that session.
+func (s *GitStore) ListTemporaryCheckpoints(ctx context.Context, baseCommit string, sessionID string, limit int) ([]TemporaryCheckpointInfo, error) {
+	_ = ctx // Reserved for future use
+
+	shadowBranchName := ShadowBranchNameForCommit(baseCommit)
+	refName := plumbing.NewBranchReferenceName(shadowBranchName)
+
+	ref, err := s.repo.Reference(refName, true)
+	if err != nil {
+		return nil, nil //nolint:nilerr // No shadow branch is expected case
+	}
+
+	iter, err := s.repo.Log(&git.LogOptions{From: ref.Hash()})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get commit log: %w", err)
+	}
+
+	var results []TemporaryCheckpointInfo
+	count := 0
+
+	err = iter.ForEach(func(c *object.Commit) error {
+		if count >= limit*5 { // Scan more to allow for session filtering
+			return errStop
+		}
+		count++
+
+		// Verify commit belongs to target session via Entire-Session trailer
+		commitSessionID, hasTrailer := paths.ParseSessionTrailer(c.Message)
+		if !hasTrailer {
+			return nil // Skip commits without session trailer
+		}
+		if sessionID != "" && commitSessionID != sessionID {
+			return nil // Skip commits from other sessions
+		}
+
+		// Get first line of message
+		message := c.Message
+		if idx := strings.Index(message, "\n"); idx > 0 {
+			message = message[:idx]
+		}
+
+		info := TemporaryCheckpointInfo{
+			CommitHash: c.Hash,
+			Message:    message,
+			SessionID:  commitSessionID,
+			Timestamp:  c.Author.When,
+		}
+
+		// Check for task checkpoint first
+		taskMetadataDir, foundTask := paths.ParseTaskMetadataTrailer(c.Message)
+		if foundTask {
+			info.IsTaskCheckpoint = true
+			info.MetadataDir = taskMetadataDir
+			info.ToolUseID = extractToolUseIDFromPath(taskMetadataDir)
+		} else {
+			metadataDir, found := paths.ParseMetadataTrailer(c.Message)
+			if found {
+				info.MetadataDir = metadataDir
+			}
+		}
+
+		results = append(results, info)
+
+		if len(results) >= limit {
+			return errStop
+		}
+		return nil
+	})
+
+	if err != nil && !errors.Is(err, errStop) {
+		return nil, fmt.Errorf("error iterating commits: %w", err)
+	}
+
+	return results, nil
+}
+
+// extractToolUseIDFromPath extracts the ToolUseID from a task metadata directory path.
+// Task metadata dirs have format: .entire/metadata/<session>/tasks/<toolUseID>
+func extractToolUseIDFromPath(metadataDir string) string {
+	parts := strings.Split(metadataDir, "/")
+	if len(parts) >= 2 && parts[len(parts)-2] == "tasks" {
+		return parts[len(parts)-1]
+	}
+	return ""
+}
+
+// errStop is a sentinel error used to break out of git log iteration.
+var errStop = errors.New("stop iteration")
+
+// ShadowBranchExists checks if a shadow branch exists for the given base commit.
+func (s *GitStore) ShadowBranchExists(baseCommit string) bool {
+	shadowBranchName := ShadowBranchNameForCommit(baseCommit)
+	refName := plumbing.NewBranchReferenceName(shadowBranchName)
+	_, err := s.repo.Reference(refName, true)
+	return err == nil
+}
+
+// DeleteShadowBranch deletes the shadow branch for the given base commit.
+func (s *GitStore) DeleteShadowBranch(baseCommit string) error {
+	shadowBranchName := ShadowBranchNameForCommit(baseCommit)
+	refName := plumbing.NewBranchReferenceName(shadowBranchName)
+	if err := s.repo.Storer.RemoveReference(refName); err != nil {
+		return fmt.Errorf("failed to delete shadow branch %s: %w", shadowBranchName, err)
+	}
+	return nil
+}
+
+// ShadowBranchNameForCommit returns the shadow branch name for a base commit hash.
+// Uses the first 7 characters of the commit hash.
+func ShadowBranchNameForCommit(baseCommit string) string {
+	if len(baseCommit) >= 7 {
+		return ShadowBranchPrefix + baseCommit[:7]
+	}
+	return ShadowBranchPrefix + baseCommit
+}
+
+// getOrCreateShadowBranch gets or creates the shadow branch for checkpoints.
+// Returns (parentHash, baseTreeHash, error).
+func (s *GitStore) getOrCreateShadowBranch(branchName string) (plumbing.Hash, plumbing.Hash, error) {
+	refName := plumbing.NewBranchReferenceName(branchName)
+	ref, err := s.repo.Reference(refName, true)
+
+	if err == nil {
+		// Branch exists
+		commit, err := s.repo.CommitObject(ref.Hash())
+		if err != nil {
+			return plumbing.ZeroHash, plumbing.ZeroHash, fmt.Errorf("failed to get commit object: %w", err)
+		}
+		return ref.Hash(), commit.TreeHash, nil
+	}
+
+	// Branch doesn't exist, use current HEAD's tree as base
+	head, err := s.repo.Head()
+	if err != nil {
+		return plumbing.ZeroHash, plumbing.ZeroHash, fmt.Errorf("failed to get HEAD: %w", err)
+	}
+
+	headCommit, err := s.repo.CommitObject(head.Hash())
+	if err != nil {
+		return plumbing.ZeroHash, plumbing.ZeroHash, fmt.Errorf("failed to get HEAD commit: %w", err)
+	}
+
+	return plumbing.ZeroHash, headCommit.TreeHash, nil
+}
+
+// buildTreeWithChanges builds a git tree with the given changes.
+// metadataDir is the relative path for git tree entries, metadataDirAbs is the absolute path
+// for filesystem operations (needed when CLI is run from a subdirectory).
+func (s *GitStore) buildTreeWithChanges(
+	baseTreeHash plumbing.Hash,
+	modifiedFiles, deletedFiles []string,
+	metadataDir, metadataDirAbs string,
+) (plumbing.Hash, error) {
+	// Get the base tree
+	baseTree, err := s.repo.TreeObject(baseTreeHash)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("failed to get base tree: %w", err)
+	}
+
+	// Flatten existing tree
+	entries := make(map[string]object.TreeEntry)
+	if err := FlattenTree(s.repo, baseTree, "", entries); err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("failed to flatten base tree: %w", err)
+	}
+
+	// Remove deleted files
+	for _, file := range deletedFiles {
+		delete(entries, file)
+	}
+
+	// Add/update modified files
+	for _, file := range modifiedFiles {
+		if !fileExists(file) {
+			delete(entries, file)
+			continue
+		}
+
+		blobHash, mode, err := createBlobFromFile(s.repo, file)
+		if err != nil {
+			// Skip files that can't be staged (may have been deleted since detection)
+			continue
+		}
+
+		entries[file] = object.TreeEntry{
+			Name: file,
+			Mode: mode,
+			Hash: blobHash,
+		}
+	}
+
+	// Add metadata directory files
+	if metadataDir != "" && metadataDirAbs != "" {
+		if err := addDirectoryToEntriesWithAbsPath(s.repo, metadataDirAbs, metadataDir, entries); err != nil {
+			return plumbing.ZeroHash, fmt.Errorf("failed to add metadata directory: %w", err)
+		}
+	}
+
+	// Build tree
+	return BuildTreeFromEntries(s.repo, entries)
+}
+
+// createCommit creates a commit object.
+func (s *GitStore) createCommit(treeHash, parentHash plumbing.Hash, message, authorName, authorEmail string) (plumbing.Hash, error) {
+	now := time.Now()
+	sig := object.Signature{
+		Name:  authorName,
+		Email: authorEmail,
+		When:  now,
+	}
+
+	commit := &object.Commit{
+		TreeHash:  treeHash,
+		Author:    sig,
+		Committer: sig,
+		Message:   message,
+	}
+
+	// Add parent if not a new branch
+	if parentHash != plumbing.ZeroHash {
+		commit.ParentHashes = []plumbing.Hash{parentHash}
+	}
+
+	obj := s.repo.Storer.NewEncodedObject()
+	if err := commit.Encode(obj); err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("failed to encode commit: %w", err)
+	}
+
+	hash, err := s.repo.Storer.SetEncodedObject(obj)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("failed to store commit: %w", err)
+	}
+
+	return hash, nil
+}
+
+// Helper functions extracted from strategy/common.go
+// These are exported for use by strategy package (push_common.go, session_test.go)
+
+// FlattenTree recursively flattens a tree into a map of full paths to entries.
+func FlattenTree(repo *git.Repository, tree *object.Tree, prefix string, entries map[string]object.TreeEntry) error {
+	for _, entry := range tree.Entries {
+		fullPath := entry.Name
+		if prefix != "" {
+			fullPath = prefix + "/" + entry.Name
+		}
+
+		if entry.Mode == filemode.Dir {
+			// Recurse into subtree
+			subtree, err := repo.TreeObject(entry.Hash)
+			if err != nil {
+				return fmt.Errorf("failed to get subtree %s: %w", fullPath, err)
+			}
+			if err := FlattenTree(repo, subtree, fullPath, entries); err != nil {
+				return err
+			}
+		} else {
+			entries[fullPath] = object.TreeEntry{
+				Name: fullPath,
+				Mode: entry.Mode,
+				Hash: entry.Hash,
+			}
+		}
+	}
+	return nil
+}
+
+// fileExists checks if a file exists at the given path.
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// createBlobFromFile creates a blob object from a file in the working directory.
+func createBlobFromFile(repo *git.Repository, filePath string) (plumbing.Hash, filemode.FileMode, error) {
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return plumbing.ZeroHash, 0, fmt.Errorf("failed to stat file: %w", err)
+	}
+
+	// Determine file mode
+	mode := filemode.Regular
+	if info.Mode()&0o111 != 0 {
+		mode = filemode.Executable
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		mode = filemode.Symlink
+	}
+
+	// Read file contents
+	content, err := os.ReadFile(filePath) //nolint:gosec // filePath comes from walking the repository
+	if err != nil {
+		return plumbing.ZeroHash, 0, fmt.Errorf("failed to read file: %w", err)
+	}
+
+	// Create blob object
+	obj := repo.Storer.NewEncodedObject()
+	obj.SetType(plumbing.BlobObject)
+	obj.SetSize(int64(len(content)))
+
+	writer, err := obj.Writer()
+	if err != nil {
+		return plumbing.ZeroHash, 0, fmt.Errorf("failed to get object writer: %w", err)
+	}
+
+	_, err = writer.Write(content)
+	if err != nil {
+		_ = writer.Close()
+		return plumbing.ZeroHash, 0, fmt.Errorf("failed to write blob content: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return plumbing.ZeroHash, 0, fmt.Errorf("failed to close blob writer: %w", err)
+	}
+
+	hash, err := repo.Storer.SetEncodedObject(obj)
+	if err != nil {
+		return plumbing.ZeroHash, 0, fmt.Errorf("failed to store blob object: %w", err)
+	}
+
+	return hash, mode, nil
+}
+
+// addDirectoryToEntriesWithAbsPath recursively adds all files in a directory to the entries map.
+func addDirectoryToEntriesWithAbsPath(repo *git.Repository, dirPathAbs, dirPathRel string, entries map[string]object.TreeEntry) error {
+	err := filepath.Walk(dirPathAbs, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+
+		// Calculate relative path within the directory, then join with dirPathRel for tree entry
+		relWithinDir, err := filepath.Rel(dirPathAbs, path)
+		if err != nil {
+			return fmt.Errorf("failed to get relative path for %s: %w", path, err)
+		}
+
+		blobHash, mode, err := createBlobFromFile(repo, path)
+		if err != nil {
+			return fmt.Errorf("failed to create blob for %s: %w", path, err)
+		}
+
+		treePath := filepath.Join(dirPathRel, relWithinDir)
+		entries[treePath] = object.TreeEntry{
+			Name: treePath,
+			Mode: mode,
+			Hash: blobHash,
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to walk directory %s: %w", dirPathAbs, err)
+	}
+	return nil
+}
+
+// treeNode represents a node in our tree structure.
+type treeNode struct {
+	entries map[string]*treeNode // subdirectories
+	files   []object.TreeEntry   // files in this directory
+}
+
+// BuildTreeFromEntries builds a proper git tree structure from flattened file entries.
+// Exported for use by strategy package (push_common.go, session_test.go)
+func BuildTreeFromEntries(repo *git.Repository, entries map[string]object.TreeEntry) (plumbing.Hash, error) {
+	// Build a tree structure
+	root := &treeNode{
+		entries: make(map[string]*treeNode),
+		files:   []object.TreeEntry{},
+	}
+
+	// Insert all entries into the tree structure
+	for fullPath, entry := range entries {
+		parts := strings.Split(fullPath, "/")
+		insertIntoTree(root, parts, entry)
+	}
+
+	// Recursively build tree objects from bottom up
+	return buildTreeObject(repo, root)
+}
+
+// insertIntoTree inserts a file entry into the tree structure.
+func insertIntoTree(node *treeNode, pathParts []string, entry object.TreeEntry) {
+	if len(pathParts) == 1 {
+		// This is a file in the current directory
+		node.files = append(node.files, object.TreeEntry{
+			Name: pathParts[0],
+			Mode: entry.Mode,
+			Hash: entry.Hash,
+		})
+		return
+	}
+
+	// This is in a subdirectory
+	dirName := pathParts[0]
+	if node.entries[dirName] == nil {
+		node.entries[dirName] = &treeNode{
+			entries: make(map[string]*treeNode),
+			files:   []object.TreeEntry{},
+		}
+	}
+	insertIntoTree(node.entries[dirName], pathParts[1:], entry)
+}
+
+// buildTreeObject recursively builds tree objects from a treeNode.
+func buildTreeObject(repo *git.Repository, node *treeNode) (plumbing.Hash, error) {
+	var treeEntries []object.TreeEntry
+
+	// Add files
+	treeEntries = append(treeEntries, node.files...)
+
+	// Recursively build subtrees
+	for name, subnode := range node.entries {
+		subHash, err := buildTreeObject(repo, subnode)
+		if err != nil {
+			return plumbing.ZeroHash, err
+		}
+		treeEntries = append(treeEntries, object.TreeEntry{
+			Name: name,
+			Mode: filemode.Dir,
+			Hash: subHash,
+		})
+	}
+
+	// Sort entries (git requires sorted entries)
+	sortTreeEntries(treeEntries)
+
+	// Create tree object
+	tree := &object.Tree{Entries: treeEntries}
+
+	obj := repo.Storer.NewEncodedObject()
+	if err := tree.Encode(obj); err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("failed to encode tree: %w", err)
+	}
+
+	hash, err := repo.Storer.SetEncodedObject(obj)
+	if err != nil {
+		return plumbing.ZeroHash, fmt.Errorf("failed to store tree: %w", err)
+	}
+
+	return hash, nil
+}
+
+// sortTreeEntries sorts tree entries in git's required order.
+// Git sorts tree entries by name, with directories having a trailing /
+func sortTreeEntries(entries []object.TreeEntry) {
+	sort.Slice(entries, func(i, j int) bool {
+		nameI := entries[i].Name
+		nameJ := entries[j].Name
+		if entries[i].Mode == filemode.Dir {
+			nameI += "/"
+		}
+		if entries[j].Mode == filemode.Dir {
+			nameJ += "/"
+		}
+		return nameI < nameJ
+	})
+}
+
+// collectWorkingDirectoryFiles collects all files in the working directory.
+// Excludes .git/ and .entire/ directories.
+func collectWorkingDirectoryFiles() ([]string, error) {
+	// Get repository root to walk from there
+	repoRoot, err := paths.RepoRoot()
+	if err != nil {
+		repoRoot = "." // Fallback to current directory
+	}
+
+	var files []string
+	err = filepath.Walk(repoRoot, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return nil //nolint:nilerr // Skip filesystem errors during walk
+		}
+
+		// Get path relative to repo root
+		relPath, err := filepath.Rel(repoRoot, path)
+		if err != nil {
+			return nil //nolint:nilerr // Skip paths we can't make relative
+		}
+
+		// Skip directories
+		if info.IsDir() {
+			// Skip .git and .entire directories
+			if relPath == gitDir || relPath == entireDir ||
+				strings.HasPrefix(relPath, gitDir+"/") || strings.HasPrefix(relPath, entireDir+"/") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		// Skip files in special directories (shouldn't reach here due to SkipDir, but safety check)
+		if strings.HasPrefix(relPath, gitDir+"/") || strings.HasPrefix(relPath, entireDir+"/") {
+			return nil
+		}
+
+		files = append(files, relPath)
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to walk directory: %w", err)
+	}
+
+	return files, nil
+}

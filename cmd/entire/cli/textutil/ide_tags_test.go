@@ -1,0 +1,71 @@
+package textutil
+
+import "testing"
+
+func TestStripIDEContextTags(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "no IDE tags",
+			input:    "make the returned number red",
+			expected: "make the returned number red",
+		},
+		{
+			name:     "ide_opened_file tag only",
+			input:    "<ide_opened_file>The user opened the file /path/to/file.md in the IDE. This may or may not be related to the current task.</ide_opened_file>",
+			expected: "",
+		},
+		{
+			name:     "ide_opened_file with real prompt",
+			input:    "<ide_opened_file>The user opened the file /path/to/file.md in the IDE.</ide_opened_file>\n\nmake the returned number red",
+			expected: "make the returned number red",
+		},
+		{
+			name:     "ide_selection tag",
+			input:    "<ide_selection file=\"/path/file.go\" lines=\"10-20\">selected code here</ide_selection>\n\nrefactor this function",
+			expected: "refactor this function",
+		},
+		{
+			name:     "multiline ide_selection",
+			input:    "<ide_selection>func main() {\n    fmt.Println(\"hello\")\n}</ide_selection>\n\noptimize this",
+			expected: "optimize this",
+		},
+		{
+			name:     "multiple IDE tags",
+			input:    "<ide_opened_file>file.go</ide_opened_file>\n\n<ide_selection>some code</ide_selection>\n\nplease fix the bug",
+			expected: "please fix the bug",
+		},
+		{
+			name:     "unknown future ide tag",
+			input:    "<ide_cursor_position line=\"42\" col=\"10\">cursor info</ide_cursor_position>\n\nhelp me here",
+			expected: "help me here",
+		},
+		{
+			name:     "preserves other XML-like content",
+			input:    "<user_note>important</user_note> and <system>info</system>",
+			expected: "<user_note>important</user_note> and <system>info</system>",
+		},
+		{
+			name:     "empty string",
+			input:    "",
+			expected: "",
+		},
+		{
+			name:     "whitespace only after stripping",
+			input:    "<ide_opened_file>file.md</ide_opened_file>   \n\n   ",
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := StripIDEContextTags(tt.input)
+			if result != tt.expected {
+				t.Errorf("StripIDEContextTags() = %q, want %q", result, tt.expected)
+			}
+		})
+	}
+}

@@ -1,0 +1,133 @@
+version: "2"
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  new: true
+  fix: true
+  new-from-merge-base: main
+linters:
+  default: standard
+  enable:
+    - asciicheck
+    - bidichk
+    - bodyclose
+    - canonicalheader
+    - copyloopvar
+    - decorder
+    - dupl
+    - durationcheck
+    - embeddedstructfieldcheck
+    - errchkjson
+    - errname
+    - errorlint
+    - exhaustive
+    - exptostd
+    - forbidigo
+    - forcetypeassert
+    - gocheckcompilerdirectives
+    - gochecknoinits
+    - gochecksumtype
+    - goconst
+    - gocritic
+    - gosec
+    - govet
+    - grouper
+    - iface
+    - importas
+    - inamedparam
+    - ineffassign
+    - intrange
+    - ireturn
+    - loggercheck
+    - maintidx
+    - makezero
+    - mirror
+    - misspell
+    - musttag
+    - nakedret
+    - nilerr
+    - nilnesserr
+    - nilnil
+    - noctx
+    - nolintlint
+    - nosprintfhostport
+    - perfsprint
+    - promlinter
+    - protogetter
+    - reassign
+    - recvcheck
+    - revive
+    - sloglint
+    - spancheck
+    - staticcheck
+    - tagalign
+    - testableexamples
+    - testifylint
+    - tparallel
+    - unconvert
+    - unparam
+    - unused
+    - usestdlibvars
+    - usetesting
+    - wastedassign
+    - whitespace
+    - wrapcheck
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: '^.*\.Reset$'
+          msg: "go-git Reset deletes .gitignored dirs - use HardResetWithProtection() from common.go"
+          pkg: 'github\.com/go-git/go-git'
+        - pattern: '^.*\.Checkout$'
+          msg: "go-git Checkout deletes .gitignored dirs - use CheckoutBranch() from git_operations.go"
+          pkg: 'github\.com/go-git/go-git'
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+        - shadow
+    ireturn:
+      allow:
+        - anon
+        - error
+        - empty
+        - stdlib
+        - grpc.DialOption
+        - entire.io/server.GitLoader
+        - github.com/go-git/go-git/v6/plumbing/storer.ReferenceIter
+        - github.com/go-git/go-git/v6/plumbing.EncodedObject
+        - github.com/go-git/go-git/v6/storage.Storer
+        - github.com/go-git/go-git/v6/plumbing/storer.EncodedObjectIter
+        - github.com/go-git/go-billy/v6.Filesystem
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    sloglint:
+      attr-only: true
+    testifylint:
+      enable-all: true
+    unparam:
+      check-exported: true
+  exclusions:
+    presets:
+      - comments
+      - std-error-handling
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
+          - wrapcheck
+          - forbidigo
+      - path: ^test/workloads/
+        linters:
+          - wrapcheck
+      - path: ^internal/sim/
+        linters:
+          - wrapcheck
+      - text: "`strat` is a misspelling"
+        linters:
+          - misspell

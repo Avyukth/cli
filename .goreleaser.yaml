@@ -1,0 +1,33 @@
+version: 2
+
+builds:
+  - main: ./cmd/entire
+    binary: entire
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X entire.io/cli/cmd/entire/cli.Version={{.Version}}
+      - -X entire.io/cli/cmd/entire/cli.Commit={{.ShortCommit}}
+
+archives:
+  - formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"

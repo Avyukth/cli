@@ -1,0 +1,41 @@
+{
+  "cli_version": "dev",
+  "checkpoint_id": "0930c3197f05",
+  "session_id": "8d58fde0-5c32-463d-ac3c-f0c840c3d193",
+  "strategy": "manual-commit",
+  "created_at": "2026-02-11T10:54:44.770827Z",
+  "branch": "add-opencode-codex-agent-support",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "cmd/entire/cli/agent/codex/codex.go",
+    "cmd/entire/cli/agent/codex/codex_test.go",
+    "cmd/entire/cli/agent/codex/hooks.go",
+    "cmd/entire/cli/agent/codex/types.go",
+    "cmd/entire/cli/agent/opencode/opencode.go",
+    "cmd/entire/cli/agent/opencode/opencode_test.go",
+    "cmd/entire/cli/agent/opencode/types.go",
+    "cmd/entire/cli/agent/registry.go",
+    "cmd/entire/cli/hook_registry.go",
+    "cmd/entire/cli/hooks_cmd.go",
+    "cmd/entire/cli/hooks_codex_handlers.go",
+    "docs/architecture/entire-cli.arch.md"
+  ],
+  "agent": "Claude Code",
+  "token_usage": {
+    "input_tokens": 100,
+    "cache_creation_tokens": 532132,
+    "cache_read_tokens": 10425825,
+    "output_tokens": 6574,
+    "api_call_count": 88
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-02-11T10:54:44.610466Z",
+    "agent_lines": 1766,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 708,
+    "total_committed": 1766,
+    "agent_percentage": 100
+  },
+  "transcript_path": ".claude/projects/-Users-amrit-Documents-Projects-Rust-mouchak-cli/8d58fde0-5c32-463d-ac3c-f0c840c3d193.jsonl"
+}

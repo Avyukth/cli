@@ -9,6 +9,8 @@ import (
 	"github.com/entireio/cli/cmd/entire/cli/agent"
 )
 
+const testThreadID = "abc-123"
+
 func TestNewCodexAgent(t *testing.T) {
 	t.Parallel()
 
@@ -129,11 +131,46 @@ func TestParseHookInput_AgentTurnComplete(t *testing.T) {
 		t.Fatalf("ParseHookInput() error = %v", err)
 	}
 
-	if result.SessionID != "abc-123" {
-		t.Errorf("SessionID = %q, want %q", result.SessionID, "abc-123")
+	if result.SessionID != testThreadID {
+		t.Errorf("SessionID = %q, want %q", result.SessionID, testThreadID)
 	}
 	if result.UserPrompt != "Fix the bug" {
 		t.Errorf("UserPrompt = %q, want %q", result.UserPrompt, "Fix the bug")
+	}
+}
+
+func TestParseHookInput_NullLastAssistantMessage(t *testing.T) {
+	t.Parallel()
+
+	// Codex's last_assistant_message is Option<String> in Rust, which serializes
+	// as null when None. Go's json.Unmarshal handles null → "" for string fields.
+	ag := &CodexAgent{}
+	input := `{"type":"agent-turn-complete","thread-id":"abc-123","turn-id":"turn-456","cwd":"/tmp","input-messages":["hello"],"last-assistant-message":null}`
+
+	result, err := ag.ParseHookInput(agent.HookStop, strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("ParseHookInput() should handle null last-assistant-message, got error: %v", err)
+	}
+
+	if result.SessionID != testThreadID {
+		t.Errorf("SessionID = %q, want %q", result.SessionID, testThreadID)
+	}
+}
+
+func TestParseHookInput_MissingLastAssistantMessage(t *testing.T) {
+	t.Parallel()
+
+	// Field omitted entirely (also valid from Codex)
+	ag := &CodexAgent{}
+	input := `{"type":"agent-turn-complete","thread-id":"abc-123","turn-id":"turn-456","cwd":"/tmp","input-messages":["hello"]}`
+
+	result, err := ag.ParseHookInput(agent.HookStop, strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("ParseHookInput() should handle missing last-assistant-message, got error: %v", err)
+	}
+
+	if result.SessionID != testThreadID {
+		t.Errorf("SessionID = %q, want %q", result.SessionID, testThreadID)
 	}
 }
 
@@ -141,8 +178,8 @@ func TestResolveSessionFile(t *testing.T) {
 	t.Parallel()
 
 	ag := &CodexAgent{}
-	result := ag.ResolveSessionFile("/home/user/.codex/sessions", "abc-123")
-	expected := "/home/user/.codex/sessions/abc-123.jsonl"
+	result := ag.ResolveSessionFile("/home/user/.codex/sessions", testThreadID)
+	expected := "/home/user/.codex/sessions/" + testThreadID + ".jsonl"
 	if result != expected {
 		t.Errorf("ResolveSessionFile() = %q, want %q", result, expected)
 	}
@@ -162,8 +199,8 @@ func TestFormatResumeCommand(t *testing.T) {
 	t.Parallel()
 
 	ag := &CodexAgent{}
-	cmd := ag.FormatResumeCommand("abc-123")
-	expected := "codex resume abc-123"
+	cmd := ag.FormatResumeCommand(testThreadID)
+	expected := "codex resume " + testThreadID
 	if cmd != expected {
 		t.Errorf("FormatResumeCommand() = %q, want %q", cmd, expected)
 	}
@@ -173,9 +210,9 @@ func TestTransformSessionID(t *testing.T) {
 	t.Parallel()
 
 	ag := &CodexAgent{}
-	id := ag.TransformSessionID("abc-123")
-	if id != "abc-123" {
-		t.Errorf("TransformSessionID() = %q, want %q", id, "abc-123")
+	id := ag.TransformSessionID(testThreadID)
+	if id != testThreadID {
+		t.Errorf("TransformSessionID() = %q, want %q", id, testThreadID)
 	}
 }
 

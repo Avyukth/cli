@@ -162,9 +162,34 @@ func (o *OpenCodeAgent) GetSessionDir(_ string) (string, error) {
 }
 
 // ResolveSessionFile returns the path to an OpenCode session file.
-// OpenCode stores session files as <id>.json.
+// OpenCode stores sessions nested by projectID: <sessionDir>/<projectID>/<id>.json
+// Since we don't know the projectID, we walk the directory tree to find a matching file.
+// Falls back to a flat path if no match is found.
 func (o *OpenCodeAgent) ResolveSessionFile(sessionDir, agentSessionID string) string {
-	return filepath.Join(sessionDir, agentSessionID+".json")
+	target := agentSessionID + ".json"
+
+	// Walk the session directory to find the file under any projectID subdirectory
+	var found string
+	_ = filepath.WalkDir(sessionDir, func(path string, d os.DirEntry, err error) error { //nolint:errcheck // non-fatal; fallback path handles missing dirs
+		if err != nil {
+			return nil //nolint:nilerr // Skip inaccessible directories
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if d.Name() == target {
+			found = path
+			return filepath.SkipAll // found it, stop walking
+		}
+		return nil
+	})
+
+	if found != "" {
+		return found
+	}
+
+	// Fallback: construct a flat path (may not exist)
+	return filepath.Join(sessionDir, target)
 }
 
 // ReadSession reads a session from OpenCode's storage (JSON session file).

@@ -181,12 +181,53 @@ func TestDetectPresence(t *testing.T) {
 func TestResolveSessionFile(t *testing.T) {
 	t.Parallel()
 
-	ag := &OpenCodeAgent{}
-	result := ag.ResolveSessionFile("/data/opencode/storage/session", "ses_abc123")
-	expected := "/data/opencode/storage/session/ses_abc123.json"
-	if result != expected {
-		t.Errorf("ResolveSessionFile() = %q, want %q", result, expected)
-	}
+	t.Run("fallback to flat path when dir does not exist", func(t *testing.T) {
+		t.Parallel()
+
+		ag := &OpenCodeAgent{}
+		result := ag.ResolveSessionFile("/data/opencode/storage/session", "ses_abc123")
+		expected := "/data/opencode/storage/session/ses_abc123.json"
+		if result != expected {
+			t.Errorf("ResolveSessionFile() = %q, want %q", result, expected)
+		}
+	})
+
+	t.Run("finds file nested under projectID subdirectory", func(t *testing.T) {
+		t.Parallel()
+
+		tempDir := t.TempDir()
+		// Simulate OpenCode's nested structure: <sessionDir>/<projectID>/<sessionID>.json
+		projectDir := filepath.Join(tempDir, "proj_xyz789")
+		if err := os.MkdirAll(projectDir, 0o750); err != nil {
+			t.Fatalf("failed to create project dir: %v", err)
+		}
+		sessionFile := filepath.Join(projectDir, "ses_abc123.json")
+		if err := os.WriteFile(sessionFile, []byte(`{}`), 0o600); err != nil {
+			t.Fatalf("failed to create session file: %v", err)
+		}
+
+		ag := &OpenCodeAgent{}
+		result := ag.ResolveSessionFile(tempDir, "ses_abc123")
+		if result != sessionFile {
+			t.Errorf("ResolveSessionFile() = %q, want %q", result, sessionFile)
+		}
+	})
+
+	t.Run("flat file still found when present at top level", func(t *testing.T) {
+		t.Parallel()
+
+		tempDir := t.TempDir()
+		sessionFile := filepath.Join(tempDir, "ses_flat.json")
+		if err := os.WriteFile(sessionFile, []byte(`{}`), 0o600); err != nil {
+			t.Fatalf("failed to create session file: %v", err)
+		}
+
+		ag := &OpenCodeAgent{}
+		result := ag.ResolveSessionFile(tempDir, "ses_flat")
+		if result != sessionFile {
+			t.Errorf("ResolveSessionFile() = %q, want %q", result, sessionFile)
+		}
+	})
 }
 
 func TestProtectedDirs(t *testing.T) {

@@ -225,11 +225,15 @@ func isEntireNotifyLine(line string) bool {
 func buildLocalDevNotifyCommand() string {
 	projectDir := os.Getenv("CODEX_PROJECT_DIR")
 	if projectDir == "" {
-		// Fallback: use current working directory
+		// Fallback: use repo root (not CWD) to avoid baking in a subdir path
 		var err error
-		projectDir, err = os.Getwd() //nolint:forbidigo // Intentional: need CWD for local dev path resolution
+		projectDir, err = paths.RepoRoot()
 		if err != nil {
-			projectDir = "."
+			// Last resort: use CWD if not in a git repo (e.g., tests)
+			projectDir, err = os.Getwd() //nolint:forbidigo // Intentional: need CWD for local dev path resolution
+			if err != nil {
+				projectDir = "."
+			}
 		}
 	}
 	mainGo := projectDir + entireNotifyLocalDevSuffix

@@ -5,23 +5,16 @@
   "branch": "add-opencode-codex-agent-support",
   "checkpoints_count": 1,
   "files_touched": [
+    "cmd/entire/cli/agent/agent_test.go",
     "cmd/entire/cli/agent/codex/codex.go",
     "cmd/entire/cli/agent/codex/codex_test.go",
-    "cmd/entire/cli/agent/codex/hooks.go",
-    "cmd/entire/cli/agent/codex/types.go",
-    "cmd/entire/cli/agent/opencode/hooks.go",
     "cmd/entire/cli/agent/opencode/opencode.go",
     "cmd/entire/cli/agent/opencode/opencode_test.go",
-    "cmd/entire/cli/agent/opencode/types.go",
-    "cmd/entire/cli/agent/registry.go",
-    "cmd/entire/cli/hook_registry.go",
-    "cmd/entire/cli/hooks_claudecode_handlers.go",
-    "cmd/entire/cli/hooks_cmd.go",
     "cmd/entire/cli/hooks_codex_handlers.go",
     "cmd/entire/cli/hooks_common_session.go",
     "cmd/entire/cli/hooks_geminicli_handlers.go",
     "cmd/entire/cli/hooks_opencode_handlers.go",
-    "cmd/entire/cli/utils.go"
+    "cmd/entire/cli/summarize/summarize.go"
   ],
   "sessions": [
     {
@@ -33,10 +26,10 @@
     }
   ],
   "token_usage": {
-    "input_tokens": 91,
-    "cache_creation_tokens": 372359,
-    "cache_read_tokens": 7986401,
-    "output_tokens": 3380,
+    "input_tokens": 79,
+    "cache_creation_tokens": 648670,
+    "cache_read_tokens": 8671007,
+    "output_tokens": 3346,
     "api_call_count": 67
   }
 }

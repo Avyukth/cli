@@ -2506,3 +2506,280 @@ Please continue the conversation from where we left off without asking the user 
 ---
 
 commit and push this to fork pr first
+
+---
+
+push to upstream
+
+---
+
+https://github.com/entireio/cli/pull/257 check  if need rebase whatever do
+
+---
+
+check the pr status and update the description based on https://github.com/entireio/cli/issues/281  and enhance exiting summary (current also good )
+
+---
+
+check conflict and resolve thinking critically
+
+---
+
+This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.
+
+Analysis:
+Let me chronologically analyze the conversation:
+
+1. **Session Start**: This is a continuation from multiple previous sessions (8+) working on PR #257 for the Entire CLI tool - adding OpenCode and Codex agent support. The session started with system reminders showing previously read files and an existing plan for "Fix 5 Codex Integration Bugs" (already completed). A new plan was in progress for "Extract Shared Hook Framework & Align with Issue #281".
+
+2. **Plan Approval Phase**: The assistant was in plan mode with a plan to extract shared session commit logic. The plan was written to the plan file and ExitPlanMode was called. The user approved the plan.
+
+3. **Implementation Phase - Creating shared file**: 
+   - Created task list (tasks #24-#29) with dependencies
+   - Created `hooks_common_session.go` with `commitAgentSession()`, `agentCommitContext` struct, `createContextFile()`, `singlePrompt()`, `logFileChanges()`, `transitionSessionTurnEnd()`
+   - Quick compile found expected redeclaration errors (functions still in old files)
+
+4. **Implementation Phase - Updating handler files**:
+   - Updated `hooks_codex_handlers.go`: Replaced `commitCodexSession` body with thin wrapper, removed `createContextFileForCodex`
+   - Updated `hooks_opencode_handlers.go`: Replaced `commitOpenCodeSession` body with thin wrapper, removed `createContextFileForOpenCode`
+   - Updated `hooks_geminicli_handlers.go`: Replaced `commitGeminiSession` body with thin wrapper, removed `logFileChanges` and `createContextFileForGemini`
+   - Updated `hooks_claudecode_handlers.go`: Removed `transitionSessionTurnEnd` (moved to shared)
+   - Fixed unused imports: removed `strategy` from codex and opencode handlers, removed `strings` from opencode handlers
+
+5. **Verification**: All tests passed (unit + integration), lint clean (only pre-existing maintidx issue), format clean.
+
+6. **User: "commit and push this to fork pr first"**
+   - Committed: `d188b0f` "Extract shared session commit pipeline into hooks_common_session.go"
+   - Pushed to origin (Avyukth/cli fork)
+
+7. **User: "push to upstream"**
+   - Attempted `git push upstream` but got permission denied (Avyukth doesn't have push access to entireio/cli)
+   - Explained this is expected for fork PRs
+
+8. **User: "https://github.com/entireio/cli/pull/257 check if need rebase whatever do"**
+   - Checked PR status: MERGEABLE but BLOCKED (awaiting CI approval)
+   - Found 3 commits behind upstream main
+   - Rebased cleanly, all tests pass, force-pushed
+
+9. **User: "check the pr status and update the description based on https://github.com/entireio/cli/issues/281 and enhance existing summary"**
+   - Read issue #281 (Refactor Agent interface for simpler agent contributions)
+   - Updated PR description with `Relates to #281`, new "Framework Extraction" section, kept existing detailed summary
+   - PR updated successfully
+
+10. **User: "check conflict and resolve thinking critically"**
+    - Fetched upstream, found 27 new commits and conflict in `hooks_geminicli_handlers.go`
+    - Key upstream change (commit `70a3e80`): moved `strat.EnsureSetup()` from commit-time to turn-start-time in both Claude Code and Gemini handlers
+    - Started rebase, got conflict on last commit
+    - Resolved conflict by keeping our thin wrapper version (removing the old expanded code that upstream also modified)
+    - After conflict resolution, found **new issue**: upstream commit `df21b89` deleted the `sessionid` package entirely, but our Codex and OpenCode agents still import it
+    - `sessionid.ModelSessionID()` was an identity function (returns input, strips legacy date prefix)
+    - `TransformSessionID` and `ExtractAgentSessionID` were removed from the Agent interface on upstream
+    - Both our Codex and OpenCode agents still implement these removed methods and import the deleted package
+
+**Current state**: Mid-rebase, conflict in `hooks_geminicli_handlers.go` resolved but compilation fails because:
+1. `sessionid` package was deleted upstream - our codex.go and opencode.go still import it
+2. `TransformSessionID` and `ExtractAgentSessionID` methods need to be removed from both agents
+3. Need to update callers that use `ExtractAgentSessionID` to pass session ID directly
+4. Also need to remove `strat.EnsureSetup()` from `commitAgentSession()` in shared file (matching upstream pattern)
+5. Need to add `strat.EnsureSetup()` to OpenCode/Codex turn-start handlers
+
+The rebase is still in progress (`git rebase --continue` hasn't been called yet).
+
+Summary:
+1. Primary Request and Intent:
+   This is session 9+ of a multi-session effort on PR #257 (Avyukth/cli → entireio/cli) adding OpenCode and Codex CLI agent support. This session's work:
+   - **Implement the approved plan**: Extract ~250 lines of duplicated framework code from Codex/OpenCode/Gemini hook handlers into a shared `hooks_common_session.go` file, aligning with issue #281's goal of separating framework from agent-specific logic
+   - **Commit and push** changes to the fork PR
+   - **Check PR status, rebase, resolve conflicts** with upstream main
+   - **Update PR description** to reference issue #281 and explain the framework extraction
+   - **Resolve merge conflicts** critically — currently in progress dealing with upstream changes that deleted the `sessionid` package and removed `TransformSessionID`/`ExtractAgentSessionID` from the Agent interface
+
+2. Key Technical Concepts:
+   - **Shared commit pipeline**: `commitAgentSession()` with `agentCommitContext` struct replaces 3 near-identical ~90-line functions
+   - **Upstream pattern change (commit `70a3e80`)**: `strat.EnsureSetup()` moved from commit-time to turn-start-time across all agents
+   - **Upstream deletion (commit `df21b89`)**: `sessionid` package deleted, `TransformSessionID` and `ExtractAgentSessionID` removed from Agent interface — these were identity functions
+   - **Fork PR workflow**: Avyukth/cli → entireio/cli, can only push to origin (fork), not upstream
+   - **Issue #281**: Maintainers want to refactor Agent interface to simplify new agent contributions — our extraction addresses part of this
+   - **Issue #221 (Pi)**: Tree-structured JSONL would need different transcript handling — not addressed in this PR
+
+3. Files and Code Sections:
+
+   - **`cmd/entire/cli/hooks_common_session.go`** (NEW — 234 lines)
+     - Core shared file created in this session
+     - Contains `commitAgentSession()`, `agentCommitContext` struct, `createContextFile()`, `singlePrompt()`, `logFileChanges()`, `transitionSessionTurnEnd()`
+     - **NEEDS FIX**: `strat.EnsureSetup()` call at line ~119 needs to be removed (upstream moved it to turn-start)
+     ```go
+     type agentCommitContext struct {
+         sessionID      string
+         sessionDir     string
+         sessionDirAbs  string
+         commitMessage  string
+         transcriptPath string
+         transcriptModifiedFiles []string
+         useGitStatusForModified bool
+         prompts []string
+         summary string
+         stepTranscriptStart      int
+         stepTranscriptIdentifier string
+         tokenUsage               *agent.TokenUsage
+     }
+     
+     func singlePrompt(prompt string) []string {
+         if prompt == "" { return nil }
+         return []string{prompt}
+     }
+     
+     func commitAgentSession(ctx *agentCommitContext) error {
+         // ... shared pipeline: load state → detect changes → filter → save via strategy
+     }
+     ```
+
+   - **`cmd/entire/cli/hooks_codex_handlers.go`** — Replaced `commitCodexSession` with thin wrapper, removed `createContextFileForCodex`, removed unused `strategy` import
+     ```go
+     func commitCodexSession(ctx *codexSessionContext) error {
+         return commitAgentSession(&agentCommitContext{
+             sessionID:               ctx.sessionID,
+             sessionDir:              ctx.sessionDir,
+             sessionDirAbs:           ctx.sessionDirAbs,
+             commitMessage:           ctx.commitMessage,
+             transcriptPath:          ctx.transcriptPath,
+             transcriptModifiedFiles: ctx.modifiedFiles,
+             prompts:                 singlePrompt(ctx.userPrompt),
+         })
+     }
+     ```
+
+   - **`cmd/entire/cli/hooks_opencode_handlers.go`** — Replaced `commitOpenCodeSession` with thin wrapper, removed `createContextFileForOpenCode`, removed unused `strings` and `strategy` imports
+     ```go
+     func commitOpenCodeSession(ctx *openCodeSessionContext) error {
+         return commitAgentSession(&agentCommitContext{
+             sessionID:               ctx.sessionID,
+             sessionDir:              ctx.sessionDir,
+             sessionDirAbs:           ctx.sessionDirAbs,
+             commitMessage:           ctx.commitMessage,
+             transcriptPath:          ctx.transcriptPath,
+             useGitStatusForModified: true,
+             prompts:                 singlePrompt(ctx.userPrompt),
+         })
+     }
+     ```
+
+   - **`cmd/entire/cli/hooks_geminicli_handlers.go`** — Replaced `commitGeminiSession` with thin wrapper (keeps Gemini-specific token usage + transcript enrichment), removed `logFileChanges` and `createContextFileForGemini`
+     ```go
+     func commitGeminiSession(ctx *geminiSessionContext) error {
+         preState, err := LoadPrePromptState(ctx.sessionID)
+         // ... extract startMessageIndex, transcriptIdentifierAtStart, tokenUsage ...
+         return commitAgentSession(&agentCommitContext{
+             sessionID:                ctx.sessionID,
+             sessionDir:               ctx.sessionDir,
+             sessionDirAbs:            ctx.sessionDirAbs,
+             commitMessage:            ctx.commitMessage,
+             transcriptPath:           ctx.transcriptPath,
+             transcriptModifiedFiles:  ctx.modifiedFiles,
+             prompts:                  ctx.allPrompts,
+             summary:                  ctx.summary,
+             stepTranscriptStart:      startMessageIndex,
+             stepTranscriptIdentifier: transcriptIdentifierAtStart,
+             tokenUsage:               tokenUsage,
+         })
+     }
+     ```
+     - **Conflict resolved**: Upstream removed `strat.EnsureSetup()` from old `commitGeminiSession` and added `strat.EnsureSetup()` to `handleGeminiBeforeAgent` (turn-start). We took our thin wrapper version. The `handleGeminiBeforeAgent` already has the upstream `EnsureSetup` from the rebase.
+
+   - **`cmd/entire/cli/hooks_claudecode_handlers.go`** — Removed `transitionSessionTurnEnd()` (moved to shared file). Upstream also added `strat.EnsureSetup()` to `captureInitialState` and removed it from `commitWithMetadata` — these changes came through cleanly in rebase.
+
+   - **`cmd/entire/cli/agent/codex/codex.go`** — **NEEDS FIX**: Still imports `sessionid` package (deleted upstream) and implements `TransformSessionID`/`ExtractAgentSessionID` (removed from interface)
+     ```go
+     // These need to be removed:
+     func (c *CodexAgent) TransformSessionID(agentSessionID string) string {
+         return agentSessionID
+     }
+     func (c *CodexAgent) ExtractAgentSessionID(entireSessionID string) string {
+         return sessionid.ModelSessionID(entireSessionID) // identity function
+     }
+     ```
+
+   - **`cmd/entire/cli/agent/opencode/opencode.go`** — **NEEDS FIX**: Same issue as codex.go — still imports `sessionid` and implements removed interface methods
+     ```go
+     // line 117 calls:
+     input.SessionRef = o.ResolveSessionFile(sessionDir, o.ExtractAgentSessionID(input.SessionID))
+     // Should become:
+     input.SessionRef = o.ResolveSessionFile(sessionDir, input.SessionID)
+     ```
+
+   - **`cmd/entire/cli/agent/codex/codex_test.go`** and **`cmd/entire/cli/agent/opencode/opencode_test.go`** — **NEED FIX**: Have `TestTransformSessionID` tests that need to be removed
+
+   - **`cmd/entire/cli/agent/agent_test.go`** — Has mock that implements `TransformSessionID` — **NEEDS FIX**
+
+   - **Callers of `ExtractAgentSessionID`**:
+     - `hooks_codex_handlers.go:57`: `ag.ExtractAgentSessionID(sessionID)` → should just pass `sessionID`
+     - `hooks_opencode_handlers.go:89`: same pattern
+     - `opencode.go:117`: same pattern
+     - `strategy/manual_commit_rewind.go:795`: mentions it in a comment — need to check
+
+4. Errors and fixes:
+   - **Compile error: redeclared functions** after creating shared file — Expected; fixed by removing functions from old locations
+   - **Compile error: unused imports** (`strategy` in codex/opencode, `strings` in opencode) — Fixed by removing them
+   - **Permission denied pushing to upstream** — Expected for fork PR; user was informed the fork push is sufficient
+   - **Merge conflict in `hooks_geminicli_handlers.go`** — Upstream commit `70a3e80` moved `EnsureSetup()` from commit-time to turn-start. Resolved by keeping our thin wrapper version.
+   - **Compile error: `sessionid` package not found** — Upstream commit `df21b89` deleted the `sessionid` package. Our Codex and OpenCode agents still import it. **NOT YET FIXED** — currently in progress.
+   - **Interface mismatch**: `TransformSessionID` and `ExtractAgentSessionID` removed from Agent interface upstream but still implemented in our agents. **NOT YET FIXED**.
+
+5. Problem Solving:
+   - **Framework extraction completed successfully**: Reduced ~250 lines of duplication to thin wrappers
+   - **Rebase conflict resolution**: Understood upstream's architectural decision (move EnsureSetup to turn-start) and aligned our code
+   - **In progress**: Fixing compilation after rebase — need to remove references to deleted `sessionid` package and removed Agent interface methods
+
+6. All user messages:
+   - (Implicit continuation from previous session — plan was being written)
+   - "commit and push this to fork pr first"
+   - "push to upstream"
+   - "https://github.com/entireio/cli/pull/257 check if need rebase whatever do"
+   - "check the pr status and update the description based on https://github.com/entireio/cli/issues/281 and enhance exiting summary (current also good)"
+   - "push to upstream" (after PR description update — no action needed, already up to date)
+   - "check conflict and resolve thinking critically"
+
+7. Pending Tasks:
+   - **Complete rebase conflict resolution**: The rebase is paused — need to:
+     1. Remove `strat.EnsureSetup()` from `commitAgentSession()` in `hooks_common_session.go` (matching upstream pattern)
+     2. Add `strat.EnsureSetup()` to OpenCode `handleOpenCodeSessionBusy` and Codex `handleCodexAgentTurnComplete` turn-start paths (or a session-start handler)
+     3. Remove `TransformSessionID()` and `ExtractAgentSessionID()` from both Codex and OpenCode agents
+     4. Remove `sessionid` import from both agent files
+     5. Update callers: replace `ag.ExtractAgentSessionID(sessionID)` with just `sessionID` in handlers and agent code
+     6. Remove `TestTransformSessionID` tests from both agent test files
+     7. Fix mock agent in `agent_test.go`
+     8. Run `git add` and `git rebase --continue`
+     9. Verify compilation, run tests
+     10. Force-push to fork
+
+8. Current Work:
+   Mid-rebase resolving conflicts with upstream main (27 new commits). The merge conflict in `hooks_geminicli_handlers.go` has been resolved (kept our thin wrapper). But compilation fails because upstream commit `df21b89` ("delete all references to entireID") deleted the `sessionid` package that our Codex and OpenCode agents still import, and removed `TransformSessionID`/`ExtractAgentSessionID` from the Agent interface.
+
+   The last grep showed all locations needing updates:
+   ```
+   cmd/entire/cli/agent/codex/codex.go:136:	return sessionid.ModelSessionID(entireSessionID)
+   cmd/entire/cli/agent/opencode/opencode.go:138:	return sessionid.ModelSessionID(entireSessionID)
+   cmd/entire/cli/agent/opencode/opencode.go:117:	input.SessionRef = o.ResolveSessionFile(sessionDir, o.ExtractAgentSessionID(input.SessionID))
+   cmd/entire/cli/hooks_codex_handlers.go:57:	resolved := ag.ResolveSessionFile(transcriptPath, ag.ExtractAgentSessionID(sessionID))
+   cmd/entire/cli/hooks_opencode_handlers.go:89:	resolved := ag.ResolveSessionFile(transcriptPath, ag.ExtractAgentSessionID(sessionID))
+   cmd/entire/cli/agent/codex/codex_test.go:209:func TestTransformSessionID
+   cmd/entire/cli/agent/opencode/opencode_test.go:273:func TestTransformSessionID
+   cmd/entire/cli/agent/agent_test.go:28:func (m *mockAgent) TransformSessionID
+   ```
+
+   The `sessionid.ModelSessionID()` was an identity function — it returned the input unchanged (or stripped a legacy date prefix for old format IDs). Since all session IDs are now just agent session IDs directly, `ExtractAgentSessionID` should be replaced with just returning/passing the session ID as-is.
+
+   Also need to remove `strat.EnsureSetup()` from `hooks_common_session.go` (our shared `commitAgentSession`) and add it to the OpenCode/Codex turn-start handlers, matching the upstream architectural pattern of calling EnsureSetup at turn-start rather than commit-time.
+
+9. Optional Next Step:
+   Continue the rebase resolution — the user's request was "check conflict and resolve thinking critically". The specific work remaining:
+   1. Remove `TransformSessionID` and `ExtractAgentSessionID` from codex.go and opencode.go, remove `sessionid` imports
+   2. Replace `ag.ExtractAgentSessionID(sessionID)` with `sessionID` in all callers
+   3. Remove `strat.EnsureSetup()` from `commitAgentSession()` in `hooks_common_session.go`
+   4. Add `strat.EnsureSetup()` to OpenCode/Codex turn-start handlers
+   5. Update/remove tests for deleted methods
+   6. `git add` all changes, `git rebase --continue`
+   7. Verify build + tests pass, force-push
+
+If you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /Users/amrit/.REDACTED.jsonl
+Please continue the conversation from where we left off without asking the user any further questions. Continue with the last task that you were asked to work on.

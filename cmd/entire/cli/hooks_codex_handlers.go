@@ -90,7 +90,11 @@ func handleCodexAgentTurnComplete() error {
 		return err
 	}
 
-	// Transition session ACTIVE → IDLE (equivalent to Claude's transitionSessionTurnEnd)
+	// Transition session ACTIVE → IDLE (equivalent to Claude's transitionSessionTurnEnd).
+	// Note: Codex only supports one hook (agent-turn-complete), so the session state
+	// machine is never initialized (no session-start or turn-start events). This call
+	// will find no state and silently return. Session phase tracking (and features that
+	// depend on it like deferred condensation) are not available for Codex sessions.
 	transitionSessionTurnEnd(sessionID)
 
 	// Capture post-turn state for the next turn's file change detection.
